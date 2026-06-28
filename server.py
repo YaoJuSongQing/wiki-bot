@@ -5,7 +5,6 @@ Auto-discovers wikis from data/*.json, switchable via API and web UI.
 import os
 import sys
 import re
-import urllib.parse
 from pathlib import Path
 import yaml
 
@@ -33,7 +32,6 @@ API_BASE = llm_cfg.get("base_url") or "https://api.deepseek.com/v1"
 MODEL = llm_cfg.get("model") or "deepseek-chat"
 HOST = srv_cfg.get("host", "0.0.0.0")
 PORT = int(srv_cfg.get("port", 8080))
-WEB_SEARCH = config.get("web_search", {}).get("enabled", True)
 
 # ── App ──────────────────────────────────────────────────────
 from contextlib import asynccontextmanager
@@ -135,34 +133,7 @@ async def system_info():
     }
 
 
-# ── Web Search ────────────────────────────────────────────────
-async def _web_search(query: str, num: int = 3) -> list[str]:
-    """Search DuckDuckGo HTML and return text snippets. No API key needed."""
-    if not WEB_SEARCH:
-        return []
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-        if resp.status_code != 200:
-            return []
-        # Extract result snippets
-        snippets = re.findall(
-            r'<a class="result__snippet"[^>]*>(.*?)</a>',
-            resp.text, re.DOTALL
-        )
-        results = []
-        for s in snippets[:num]:
-            clean = re.sub(r'<[^>]+>', '', s).strip()
-            if len(clean) > 20:
-                results.append(clean)
-        return results
-    except Exception:
-        return []
-
-
+# ── Endpoints ────────────────────────────────────────────────
 @app.post("/ask", response_model=AnswerResponse)
 async def ask(request: QuestionRequest):
     if not API_KEY:
@@ -217,22 +188,8 @@ async def ask(request: QuestionRequest):
             chunks = merged[:15]
 
     if not chunks:
-        # Try web search before giving up
-        web_snippets = await _web_search(request.question, num=5)
-        if web_snippets:
-            return AnswerResponse(
-                question=request.question, wiki=kb.name,
-                answer="📖 Wiki 中未找到相关内容，以下是网络搜索结果：\n\n" + "\n\n".join(f"• {s}" for s in web_snippets),
-                sources=[]
-            )
-        return AnswerResponse(question=request.question, wiki=kb.name,
-                              answer="⚠ 未找到相关内容。试试用英文关键词提问。", sources=[])
-
-    # ── Web search for supplementary context ──────────────────
-    web_snippets = []
-    top_score = chunks[0]["score"] if chunks else 0
-    if WEB_SEARCH and (len(chunks) < 3 or top_score < 0.15):
-        web_snippets = await _web_search(request.question, num=3)
+        # Still ask LLM with web search — it can search itself
+        pass  # fall through to LLM with enable_search
 
     # ── LLM Rerank: pick the top 5 most relevant chunks ─────
     if len(chunks) > 5 and API_KEY:
@@ -265,25 +222,20 @@ async def ask(request: QuestionRequest):
         seen.add(key)
         context_parts.append(f"--- {c['page']} | {c['section']} ---\n{c['text']}")
 
-    # Append web search results if any
-    if web_snippets:
-        context_parts.append("--- Web Search Results ---\n" + "\n\n".join(f"[Web {i}] {s}" for i, s in enumerate(web_snippets, 1)))
-
     sp = (
         f"You are a knowledgeable Q&A bot for {kb.name}. "
-        "Think step by step: first analyze what information the context provides, then identify what's missing, "
-        "then synthesize an answer. If wiki context is insufficient, use web search results to fill gaps. "
+        "First, answer using the wiki context provided below. "
+        "If the wiki context doesn't fully answer the question, use web search to supplement your knowledge. "
         "Always respond in the same language as the user's question. "
-        "Include specific facts, stats, or steps when available. "
-        "If web results are used, cite them naturally in your answer."
+        "Include specific facts, stats, or steps. Be thorough and helpful."
     )
-    user_prompt = f"Context:\n\n{'\\n\\n'.join(context_parts)}\n\nQuestion: {request.question}\n\nAnswer:"
+    user_prompt = f"Context:\n\n{'\\\\n\\\\n'.join(context_parts) if context_parts else '(No wiki results found — answer based on your knowledge and web search)'}\n\nQuestion: {request.question}\n\nAnswer:"
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             f"{API_BASE}/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={"model": MODEL, "messages": [{"role": "system", "content": sp}, {"role": "user", "content": user_prompt}], "temperature": 0.3, "max_tokens": 1500},
+            json={"model": MODEL, "messages": [{"role": "system", "content": sp}, {"role": "user", "content": user_prompt}], "temperature": 0.3, "max_tokens": 2000, "enable_search": True},
         )
 
     if resp.status_code != 200:
