@@ -263,10 +263,11 @@ async def ask(request: QuestionRequest):
         f"You are a knowledgeable Q&A bot for {kb.name}. "
         "First, answer using the wiki context provided below. "
         "If the wiki context doesn't fully answer the question, use web search to supplement your knowledge. "
-        "Always respond in the same language as the user's question. "
+        "CRITICAL: YOU MUST respond in the SAME LANGUAGE as the user's question. "
+        "If the user asks in Chinese, answer in Chinese. If in English, answer in English. "
         "Include specific facts, stats, or steps. Be thorough and helpful."
     )
-    user_prompt = f"Context:\n\n" + "\n\n".join(context_parts) if context_parts else "Context: (No wiki results found — answer with web search)\n\n" + f"Question: {request.question}\n\nAnswer:"
+    user_prompt = f"Context:\n\n" + "\n\n".join(context_parts) if context_parts else "Context: (No wiki results found — answer with web search)\n\n" + f"Question: {request.question}\n\nAnswer (must be in the same language as the question):"
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
