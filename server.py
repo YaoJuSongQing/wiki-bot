@@ -29,7 +29,7 @@ srv_cfg = config.get("server", {})
 
 API_KEY = llm_cfg.get("api_key") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 API_BASE = llm_cfg.get("base_url") or "https://api.deepseek.com/v1"
-MODEL = llm_cfg.get("model") or "deepseek-chat"
+MODEL = llm_cfg.get("model") or "deepseek-v4-flash"
 HOST = srv_cfg.get("host", "0.0.0.0")
 PORT = int(srv_cfg.get("port", 8080))
 

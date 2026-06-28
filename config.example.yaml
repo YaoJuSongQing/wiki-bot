@@ -9,7 +9,7 @@ wiki:
 llm:
   provider: "deepseek"
   api_key: "sk-这里填你的key"
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
   base_url: "https://api.deepseek.com/v1"
 
 server:
