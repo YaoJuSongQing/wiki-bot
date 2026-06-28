@@ -95,10 +95,68 @@ def scrape_sphinx(base_url: str) -> dict:
 
 
 # ── MediaWiki scraper ────────────────────────────────────────
+def strip_wikitext(text: str) -> str:
+    """Convert MediaWiki wikitext to readable plain text."""
+    import html
+    # Remove HTML comments
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    # Remove templates {{...}} (nested)
+    depth = 0
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i:i+2] == '{{' and depth == 0:
+            depth = 1
+            i += 2
+            continue
+        if depth > 0:
+            if text[i:i+2] == '{{':
+                depth += 1
+                i += 2
+                continue
+            elif text[i:i+2] == '}}':
+                depth -= 1
+                i += 2
+                continue
+            i += 1
+            continue
+        result.append(text[i])
+        i += 1
+    text = ''.join(result)
+    # Remove tables {|...|}
+    text = re.sub(r'\{\|.*?\|\}', '', text, flags=re.DOTALL)
+    # Links: [[target|display]] -> display, [[target]] -> target
+    text = re.sub(r'\[\[([^|\]]+)\|([^\]]+)\]\]', r'\2', text)
+    text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text)
+    # External links: [url text] -> text
+    text = re.sub(r'\[https?://[^\s\]]+\s+([^\]]+)\]', r'\1', text)
+    text = re.sub(r'\[https?://[^\s\]]+\]', '', text)
+    # Remove ref tags
+    text = re.sub(r'<ref[^>]*>.*?</ref>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<ref[^>]*/>', '', text)
+    # Remove other HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Bold/italic
+    text = re.sub(r"'''(.+?)'''", r'\1', text)
+    text = re.sub(r"''(.+?)''", r'\1', text)
+    # Lists
+    text = re.sub(r'^[*#:;]+\s*', '', text, flags=re.MULTILINE)
+    # Headers == ... ==
+    text = re.sub(r'^=+\s*(.+?)\s*=+$', r'## \1', text, flags=re.MULTILINE)
+    # Horizontal rules
+    text = re.sub(r'^-{4,}', '', text)
+    # Decode HTML entities
+    text = html.unescape(text)
+    # Clean whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' {2,}', ' ', text)
+    return text.strip()
+
+
 def scrape_mediawiki(api_url: str, base_url: str) -> dict:
     """
     Scrape MediaWiki site (Wikipedia, Fandom, etc.) via API.
-    api_url: e.g. https://genshin-impact.fandom.com/api.php
+    Uses revisions API for wikitext, then strips formatting.
     """
     import urllib.parse
 
@@ -130,19 +188,18 @@ def scrape_mediawiki(api_url: str, base_url: str) -> dict:
         else:
             break
 
-    # For large wikis, limit to main namespace, skip template/category pages
+    # Filter out non-content pages
     page_titles = [t for t in page_titles if not t.startswith(("Template:", "Category:", "File:", "Module:", "MediaWiki:"))]
     print(f"Found {len(page_titles)} pages. Fetching content...")
 
-    # Fetch page content in batches of 50
-    for i in range(0, len(page_titles), 50):
-        batch = page_titles[i:i+50]
+    # Fetch page content in batches of 25 (revisions API is heavier)
+    for i in range(0, len(page_titles), 25):
+        batch = page_titles[i:i+25]
         params = {
             "action": "query",
             "format": "json",
-            "prop": "extracts",
-            "exintro": "0",          # full page, not just intro
-            "explaintext": "1",      # plain text, no HTML
+            "prop": "revisions",
+            "rvprop": "content",
             "titles": "|".join(batch),
         }
         url = api_url + "?" + urllib.parse.urlencode(params)
@@ -152,10 +209,13 @@ def scrape_mediawiki(api_url: str, base_url: str) -> dict:
                 data = json.loads(resp.read())
             for page_id, page_data in data["query"]["pages"].items():
                 title = page_data.get("title", page_id)
-                extract = page_data.get("extract", "")
-                if extract and len(extract) > 100:
-                    results[title] = extract
-            print(f"  [{min(i+50, len(page_titles))}/{len(page_titles)}] OK")
+                revisions = page_data.get("revisions", [])
+                if revisions and "*" in revisions[0]:
+                    raw = revisions[0]["*"]
+                    text = strip_wikitext(raw)
+                    if len(text) > 100:
+                        results[title] = text
+            print(f"  [{min(i+25, len(page_titles))}/{len(page_titles)}] OK")
         except Exception as e:
             print(f"  Batch failed: {e}")
 
@@ -190,7 +250,7 @@ def main():
         print(f"ERROR: {CONFIG_PATH} not found. Create config.yaml first.")
         sys.exit(1)
 
-    with open(CONFIG_PATH) as f:
+    with open(CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     # Support single wiki or wikis list
@@ -257,7 +317,15 @@ def main():
         print(f"✓ Saved {len(results)} pages ({total_chars:,} chars) → {output}")
         print(f"  Slug: {slug}")
 
-    print(f"\nDone. Restart server to load new wikis.")
+    print(f"\nDone. Server will hot-reload new wikis within 5 seconds.")
+
+    # Auto-sync to Desktop sharing package
+    dst = Path("/mnt/c/Users/hsyhi/Desktop/WikiBot分享包/data")
+    if dst.parent.exists():
+        import shutil
+        for f in DATA_DIR.glob("*.json"):
+            shutil.copy2(f, dst / f.name)
+        print("✓ Synced to Desktop/WikiBot分享包/")
 
 
 if __name__ == "__main__":

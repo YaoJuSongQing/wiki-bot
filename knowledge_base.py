@@ -1,7 +1,6 @@
 """
-Multi-wiki knowledge base. Auto-discovers wiki data files in data/ directory.
-Supports multiple wikis simultaneously, each with independent TF-IDF index.
-Hot reload: detects new/modified data files and reloads automatically.
+Multi-wiki knowledge base. TF-IDF for fast retrieval.
+LLM reranking happens in server.py for semantic precision.
 """
 import json
 import re
@@ -17,8 +16,6 @@ DATA_DIR = Path(__file__).parent / "data"
 
 
 class WikiKB:
-    """Knowledge base for a single wiki."""
-
     def __init__(self, slug: str, name: str = ""):
         self.slug = slug
         self.name = name or slug
@@ -28,12 +25,12 @@ class WikiKB:
         self.chunk_matrix = None
         self.data_file = DATA_DIR / f"{slug}.json"
         self.index_dir = DATA_DIR / f"{slug}_index"
-        self._mtime = 0  # file modification time when last loaded
+        self._mtime = 0
 
     def load(self):
         if not self.data_file.exists():
             raise FileNotFoundError(f"Data file not found: {self.data_file}")
-        with open(self.data_file, "r") as f:
+        with open(self.data_file, "r", encoding="utf-8") as f:
             self.pages = json.load(f)
         self._mtime = self.data_file.stat().st_mtime
         self._chunk_pages()
@@ -41,7 +38,6 @@ class WikiKB:
         return len(self.pages), len(self.chunks)
 
     def is_stale(self) -> bool:
-        """Check if data file has been modified since last load."""
         if not self.data_file.exists():
             return False
         return self.data_file.stat().st_mtime > self._mtime
@@ -62,18 +58,33 @@ class WikiKB:
         if not self.chunks:
             return
         texts = [c["text"] for c in self.chunks]
-        self.vectorizer = TfidfVectorizer(max_features=5000, stop_words=None, ngram_range=(1, 2), sublinear_tf=True)
+        self.vectorizer = TfidfVectorizer(max_features=8000, stop_words=None, ngram_range=(1, 2), sublinear_tf=True)
         self.chunk_matrix = self.vectorizer.fit_transform(texts)
 
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
+    def search(self, query: str, top_k: int = 15) -> list[dict]:
         if self.vectorizer is None or self.chunk_matrix is None:
             return []
         query_vec = self.vectorizer.transform([query])
         scores = cosine_similarity(query_vec, self.chunk_matrix)[0]
+
+        # Title boosting
+        import string
+        q_clean = query.lower().translate(str.maketrans('', '', string.punctuation))
+        query_words = set(q_clean.split())
+        for i, c in enumerate(self.chunks):
+            p_clean = c["page"].lower().translate(str.maketrans('', '', string.punctuation))
+            title_words = set(p_clean.split())
+            overlap = query_words & title_words
+            if overlap:
+                boost = 0.1 + 0.2 * (len(overlap) / max(len(query_words), 1))
+                if p_clean in q_clean:
+                    boost += 0.15
+                scores[i] += boost
+
         top_indices = np.argsort(scores)[::-1][:top_k]
         results = []
         for idx in top_indices:
-            if scores[idx] < 0.05:
+            if scores[idx] < 0.03:
                 continue
             results.append({**self.chunks[idx], "score": float(scores[idx])})
         return results
@@ -101,8 +112,6 @@ class WikiKB:
 
 
 class MultiWikiKB:
-    """Manages multiple wikis, auto-discovers from data/ directory."""
-
     def __init__(self):
         self.wikis: dict[str, WikiKB] = {}
         self.default_slug: str | None = None
@@ -110,25 +119,30 @@ class MultiWikiKB:
         self._discover()
 
     def _discover(self):
-        """Find all {slug}.json files in data/ directory."""
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         for f in sorted(DATA_DIR.glob("*.json")):
             slug = f.stem
-            if slug in ("config",):
+            if slug in ("config",) or slug.endswith(".meta"):
                 continue
             if slug in self.wikis:
-                # Already loaded — check if stale
                 if self.wikis[slug].is_stale():
                     self._reload_wiki(slug)
             else:
-                # New wiki
                 self._load_wiki(slug)
             if self.default_slug is None:
                 self.default_slug = slug
 
     def _load_wiki(self, slug: str):
-        """Load a single wiki by slug."""
         name = slug.replace("_", " ").title()
+        meta_file = DATA_DIR / f"{slug}.meta.json"
+        if meta_file.exists():
+            try:
+                with open(meta_file, encoding="utf-8") as f:
+                    meta = json.load(f)
+                if meta.get("name"):
+                    name = meta["name"]
+            except:
+                pass
         kb = WikiKB(slug, name=name)
         try:
             if not kb.load_index():
@@ -143,24 +157,16 @@ class MultiWikiKB:
             return False
 
     def _reload_wiki(self, slug: str):
-        """Reload a modified wiki."""
         print(f"[hot-reload] {slug} changed, reloading...")
         old = self.wikis.pop(slug, None)
-        # Clear old index
         if old:
             import shutil
             if old.index_dir.exists():
                 shutil.rmtree(old.index_dir)
         if self._load_wiki(slug):
-            kb = self.wikis[slug]
-            print(f"[hot-reload] ✓ {slug}: {len(kb.pages)} pages, {len(kb.chunks)} chunks")
-        else:
-            # Restore old if reload failed
-            if old:
-                self.wikis[slug] = old
+            print(f"[hot-reload] OK {slug}: {len(self.wikis[slug].pages)}p")
 
     def reload(self) -> dict:
-        """Check for new/modified files and reload. Returns changes."""
         before = set(self.wikis.keys())
         self._discover()
         after = set(self.wikis.keys())
@@ -169,62 +175,39 @@ class MultiWikiKB:
         if modified:
             for s in modified:
                 self._reload_wiki(s)
-        return {
-            "added": list(added),
-            "modified": list(modified),
-            "total": len(self.wikis),
-            "wikis": self.list_wikis(),
-        }
+        return {"added": list(added), "modified": list(modified), "total": len(self.wikis), "wikis": self.list_wikis()}
 
-    def start_watcher(self, interval: float = 5.0):
-        """Start background thread that polls for file changes."""
-        if self._watcher_running:
-            return
+    def start_watcher(self, interval=5.0):
+        if self._watcher_running: return
         self._watcher_running = True
-
-        def _watch():
+        def _w():
             while self._watcher_running:
                 time.sleep(interval)
-                try:
-                    self._discover()
-                except Exception:
-                    pass
+                try: self._discover()
+                except: pass
+        t = threading.Thread(target=_w, daemon=True); t.start()
 
-        t = threading.Thread(target=_watch, daemon=True)
-        t.start()
-
-    def stop_watcher(self):
-        self._watcher_running = False
+    def stop_watcher(self): self._watcher_running = False
 
     def list_wikis(self) -> list[dict]:
-        return [
-            {"slug": slug, "name": kb.name, "pages": len(kb.pages), "chunks": len(kb.chunks)}
-            for slug, kb in self.wikis.items()
-        ]
+        return [{"slug": s, "name": k.name, "pages": len(k.pages), "chunks": len(k.chunks)} for s, k in self.wikis.items()]
 
-    def get(self, slug: str | None = None) -> WikiKB | None:
-        if slug and slug in self.wikis:
-            return self.wikis[slug]
-        if self.default_slug and self.default_slug in self.wikis:
-            return self.wikis[self.default_slug]
-        for kb in self.wikis.values():
-            return kb
+    def get(self, slug=None) -> WikiKB | None:
+        if slug and slug in self.wikis: return self.wikis[slug]
+        if self.default_slug and self.default_slug in self.wikis: return self.wikis[self.default_slug]
+        for kb in self.wikis.values(): return kb
         return None
 
-    def search(self, query: str, slug: str | None = None, top_k: int = 5) -> tuple[list[dict], str]:
+    def search(self, query, slug=None, top_k=15):
         kb = self.get(slug)
-        if kb is None:
-            return [], ""
+        if kb is None: return [], ""
         return kb.search(query, top_k=top_k), kb.name
 
 
-# Singleton
-_mkb: MultiWikiKB | None = None
-
-
-def get_kb() -> MultiWikiKB:
+_mkb = None
+def get_kb():
     global _mkb
     if _mkb is None:
         _mkb = MultiWikiKB()
-        _mkb.start_watcher(interval=5.0)
+        _mkb.start_watcher(5.0)
     return _mkb

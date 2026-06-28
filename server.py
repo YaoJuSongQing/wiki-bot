@@ -20,7 +20,7 @@ from knowledge_base import get_kb
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 config = {}
 if CONFIG_PATH.exists():
-    with open(CONFIG_PATH) as f:
+    with open(CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
 wiki_cfg = config.get("wiki", {})
@@ -49,8 +49,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # ── Models ───────────────────────────────────────────────────
 class QuestionRequest(BaseModel):
     question: str
-    wiki: str | None = None   # wiki slug, e.g. "llm_cli"
-    top_k: int = 5
+    wiki: str | None = None   # wiki slug, e.g. "isaac"
+    top_k: int = 8
 
 class RelevantChunk(BaseModel):
     page: str
@@ -160,28 +160,59 @@ async def ask(request: QuestionRequest):
         if any(t in q for t in triggers):
             return AnswerResponse(question=request.question, wiki=kb.name, answer=answer, sources=[])
 
-    chunks = kb.search(request.question, top_k=request.top_k)
+    chunks = kb.search(request.question, top_k=15)  # Get more candidates
 
-    # Fallback: if query has CJK chars and no results, translate to English
+    # Chinese/CJK: translate and merge results
     has_cjk = bool(re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', request.question))
-    if not chunks and has_cjk and API_KEY:
-        # Translate via LLM
+    if has_cjk and API_KEY:
         async with httpx.AsyncClient(timeout=30.0) as client:
             tr_resp = await client.post(
                 f"{API_BASE}/chat/completions",
                 headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
                 json={"model": MODEL, "messages": [
-                    {"role": "system", "content": "Translate the following question to English. Output ONLY the English translation, nothing else."},
+                    {"role": "system", "content": "Translate to English. Keep proper nouns in original form. Output ONLY translation."},
                     {"role": "user", "content": request.question}
                 ], "temperature": 0, "max_tokens": 100},
             )
         if tr_resp.status_code == 200:
             en_query = tr_resp.json()["choices"][0]["message"]["content"].strip()
-            chunks = kb.search(en_query, top_k=request.top_k)
+            en_chunks = kb.search(en_query, top_k=15)
+            seen = set()
+            merged = []
+            for c in en_chunks + chunks:
+                key = c["page"] + c["section"]
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(c)
+            chunks = merged[:15]
 
     if not chunks:
-        hint = "⚠ 这个 wiki 的内容是英文的，建议用英文提问。例如 'how to install'"
-        return AnswerResponse(question=request.question, wiki=kb.name, answer=hint, sources=[])
+        return AnswerResponse(question=request.question, wiki=kb.name,
+                              answer="⚠ 未找到相关内容。试试用英文关键词提问。", sources=[])
+
+    # ── LLM Rerank: pick the top 5 most relevant chunks ─────
+    if len(chunks) > 5 and API_KEY:
+        candidates_text = "\n\n".join(
+            f"[{i}] Page: {c['page']}\n{c['text'][:300]}"
+            for i, c in enumerate(chunks)
+        )
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            rr_resp = await client.post(
+                f"{API_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                json={"model": MODEL, "messages": [
+                    {"role": "system", "content": "Pick the 5 most relevant chunks for answering the question. Output ONLY the indices separated by commas, e.g.: 3,7,1,12,5"},
+                    {"role": "user", "content": f"Question: {request.question}\n\nCandidates:\n{candidates_text}"}
+                ], "temperature": 0, "max_tokens": 50},
+            )
+        if rr_resp.status_code == 200:
+            try:
+                indices = [int(x.strip()) for x in rr_resp.json()["choices"][0]["message"]["content"].strip().split(",") if x.strip().isdigit()]
+                chunks = [chunks[i] for i in indices if 0 <= i < len(chunks)][:5]
+            except:
+                chunks = chunks[:5]  # fallback
+    else:
+        chunks = chunks[:5]
 
     context_parts, seen = [], set()
     for c in chunks:
@@ -190,7 +221,7 @@ async def ask(request: QuestionRequest):
         seen.add(key)
         context_parts.append(f"--- {c['page']} | {c['section']} ---\n{c['text']}")
 
-    sp = f"You are a Q&A bot for {kb.name}. Answer based ONLY on the provided context. Be concise, cite sources."
+    sp = f"You are a Q&A bot for {kb.name}. Answer the question using the provided context. If the context has relevant info, give a detailed, helpful answer. If not, say so clearly. Always respond in the same language as the user's question. Include specific facts, stats, or steps from the context when available."
     user_prompt = f"Context:\n\n{'\\n\\n'.join(context_parts)}\n\nQuestion: {request.question}\n\nAnswer:"
 
     async with httpx.AsyncClient(timeout=60.0) as client:
