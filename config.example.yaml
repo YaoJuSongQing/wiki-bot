@@ -12,6 +12,14 @@ llm:
   model: "deepseek-v4-flash"
   base_url: "https://api.deepseek.com/v1"
 
+embedding:
+  # 中文推荐: BAAI/bge-small-zh-v1.5 (24MB, 512维)
+  # 英文推荐: all-MiniLM-L6-v2 (80MB, 384维)
+  # 多语言: BAAI/bge-m3 (2.2GB, 1024维)
+  model: "BAAI/bge-small-zh-v1.5"
+  # 国内用户建议用镜像，留空则直连 huggingface.co
+  hf_endpoint: "https://hf-mirror.com"
+
 server:
   host: "0.0.0.0"
   port: 8080

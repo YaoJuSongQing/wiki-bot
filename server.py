@@ -26,10 +26,13 @@ if CONFIG_PATH.exists():
 wiki_cfg = config.get("wiki", {})
 llm_cfg = config.get("llm", {})
 srv_cfg = config.get("server", {})
+emb_cfg = config.get("embedding", {})
 
 API_KEY = llm_cfg.get("api_key") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 API_BASE = llm_cfg.get("base_url") or "https://api.deepseek.com/v1"
 MODEL = llm_cfg.get("model") or "deepseek-v4-flash"
+EMBEDDING_MODEL = emb_cfg.get("model", "BAAI/bge-small-zh-v1.5")
+HF_ENDPOINT = emb_cfg.get("hf_endpoint", "")
 HOST = srv_cfg.get("host", "0.0.0.0")
 PORT = int(srv_cfg.get("port", 8080))
 
@@ -38,7 +41,12 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    get_kb()  # preload on startup
+    mkb = get_kb(embedding_model=EMBEDDING_MODEL, hf_endpoint=HF_ENDPOINT)
+    # Warm up: trigger model load so first request isn't slow
+    try:
+        mkb.search("warmup", top_k=1)
+    except:
+        pass
     yield
 
 
@@ -127,7 +135,9 @@ async def system_info():
     return {
         "api_provider": "deepseek" if "deepseek" in API_BASE else "openai",
         "model": MODEL,
-        "cost_estimate": "≈¥0.002/question (DeepSeek: ¥1/M tokens)",
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_type": "dense (sentence-transformers)",
+        "cost_estimate": "≈¥0.002/question (DeepSeek: ¥1/M tokens, embedding: free/local)",
         "hot_reload": "enabled (5s polling, or POST /reload)",
         "wikis": mkb.list_wikis(),
     }
@@ -371,7 +381,7 @@ async def index():
 
 if __name__ == "__main__":
     import uvicorn
-    mkb = get_kb()
+    mkb = get_kb(embedding_model=EMBEDDING_MODEL)
     print(f"Loaded {len(mkb.wikis)} wiki(s): {', '.join(w['name'] for w in mkb.list_wikis())}")
     if not API_KEY:
         print("⚠ No API key — /ask disabled, /search still works")
@@ -385,6 +395,7 @@ if __name__ == "__main__":
         pass
 
     print(f"✓ http://localhost:{PORT}")
+    print(f"  Embedding: {EMBEDDING_MODEL}")
     print(f"  Hot reload: enabled (drop .json into data/ dir)")
     print(f"  Update wiki: POST /update")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

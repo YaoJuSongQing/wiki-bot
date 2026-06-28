@@ -1,28 +1,43 @@
 """
-Multi-wiki knowledge base. TF-IDF for fast retrieval.
+Multi-wiki knowledge base. Dense embedding retrieval (sentence-transformers).
 LLM reranking happens in server.py for semantic precision.
 """
 import json
 import re
-import pickle
 import time
 import threading
 from pathlib import Path
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
 DATA_DIR = Path(__file__).parent / "data"
 
+# Shared embedding model (lazy-loaded, one per process)
+_embedding_model = None
+_embedding_model_name = None
+
+
+def _get_embedding_model(model_name: str = "BAAI/bge-small-zh-v1.5", hf_endpoint: str = ""):
+    """Lazy-load and cache the sentence-transformers model."""
+    global _embedding_model, _embedding_model_name
+    if _embedding_model is None or _embedding_model_name != model_name:
+        import os
+        if hf_endpoint:
+            os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer(model_name)
+        _embedding_model_name = model_name
+    return _embedding_model
+
 
 class WikiKB:
-    def __init__(self, slug: str, name: str = ""):
+    def __init__(self, slug: str, name: str = "", embedding_model: str = "BAAI/bge-small-zh-v1.5", hf_endpoint: str = ""):
         self.slug = slug
         self.name = name or slug
+        self.embedding_model = embedding_model
+        self.hf_endpoint = hf_endpoint
         self.pages = {}
         self.chunks = []
-        self.vectorizer = None
-        self.chunk_matrix = None
+        self.chunk_embeddings = None  # np.ndarray (n_chunks, dim)
         self.data_file = DATA_DIR / f"{slug}.json"
         self.index_dir = DATA_DIR / f"{slug}_index"
         self._mtime = 0
@@ -34,7 +49,12 @@ class WikiKB:
             self.pages = json.load(f)
         self._mtime = self.data_file.stat().st_mtime
         self._chunk_pages()
-        self._build_index()
+
+        # Try loading cached embeddings first
+        if not self._load_embeddings():
+            self._build_embeddings()
+            self._save_embeddings()
+
         return len(self.pages), len(self.chunks)
 
     def is_stale(self) -> bool:
@@ -54,37 +74,34 @@ class WikiKB:
                 section_title = header_match.group(1).strip() if header_match else page_name
                 self.chunks.append({"page": page_name, "section": section_title, "text": sec})
 
-    def _build_index(self):
+    def _build_embeddings(self):
+        """Generate dense embeddings for all chunks."""
         if not self.chunks:
             return
         texts = [c["text"] for c in self.chunks]
-        self.vectorizer = TfidfVectorizer(max_features=8000, stop_words=None, ngram_range=(1, 2), sublinear_tf=True)
-        self.chunk_matrix = self.vectorizer.fit_transform(texts)
+        model = _get_embedding_model(self.embedding_model, self.hf_endpoint)
+        self.chunk_embeddings = model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            batch_size=32,
+        )
 
     def search(self, query: str, top_k: int = 15) -> list[dict]:
-        if self.vectorizer is None or self.chunk_matrix is None:
+        """Dense vector similarity search."""
+        if self.chunk_embeddings is None or len(self.chunk_embeddings) == 0:
             return []
-        query_vec = self.vectorizer.transform([query])
-        scores = cosine_similarity(query_vec, self.chunk_matrix)[0]
 
-        # Title boosting
-        import string
-        q_clean = query.lower().translate(str.maketrans('', '', string.punctuation))
-        query_words = set(q_clean.split())
-        for i, c in enumerate(self.chunks):
-            p_clean = c["page"].lower().translate(str.maketrans('', '', string.punctuation))
-            title_words = set(p_clean.split())
-            overlap = query_words & title_words
-            if overlap:
-                boost = 0.1 + 0.2 * (len(overlap) / max(len(query_words), 1))
-                if p_clean in q_clean:
-                    boost += 0.15
-                scores[i] += boost
+        model = _get_embedding_model(self.embedding_model, self.hf_endpoint)
+        query_vec = model.encode([query], normalize_embeddings=True)[0]
+
+        # Cosine similarity (vectors are normalized, so dot product = cosine)
+        scores = np.dot(self.chunk_embeddings, query_vec)
 
         top_indices = np.argsort(scores)[::-1][:top_k]
         results = []
         for idx in top_indices:
-            if scores[idx] < 0.03:
+            if scores[idx] < 0.25:  # minimum relevance threshold
                 continue
             results.append({**self.chunks[idx], "score": float(scores[idx])})
         return results
@@ -92,27 +109,43 @@ class WikiKB:
     def list_pages(self) -> list[str]:
         return sorted(self.pages.keys())
 
-    def save_index(self):
+    def _save_embeddings(self):
+        """Cache embeddings to disk for fast reload."""
+        if self.chunk_embeddings is None:
+            return
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.index_dir / "vectorizer.pkl", "wb") as f:
-            pickle.dump(self.vectorizer, f)
-        with open(self.index_dir / "matrix.pkl", "wb") as f:
-            pickle.dump(self.chunk_matrix, f)
+        np.save(str(self.index_dir / "embeddings.npy"), self.chunk_embeddings)
+        # Save metadata so we can detect model changes
+        meta = {"model": self.embedding_model, "n_chunks": len(self.chunks)}
+        import json as _json
+        (self.index_dir / "meta.json").write_text(_json.dumps(meta), encoding="utf-8")
 
-    def load_index(self) -> bool:
-        vf = self.index_dir / "vectorizer.pkl"
-        mf = self.index_dir / "matrix.pkl"
-        if vf.exists() and mf.exists():
-            with open(vf, "rb") as f:
-                self.vectorizer = pickle.load(f)
-            with open(mf, "rb") as f:
-                self.chunk_matrix = pickle.load(f)
-            return True
-        return False
+    def _load_embeddings(self) -> bool:
+        """Load cached embeddings from disk. Returns False if cache missing/mismatched."""
+        ef = self.index_dir / "embeddings.npy"
+        mf = self.index_dir / "meta.json"
+        if not ef.exists() or not mf.exists():
+            return False
+
+        # Check model match
+        try:
+            import json as _json
+            meta = _json.loads(mf.read_text(encoding="utf-8"))
+            if meta.get("model") != self.embedding_model:
+                return False  # Model changed, rebuild needed
+            if meta.get("n_chunks") != len(self.chunks):
+                return False  # Data changed
+        except Exception:
+            pass
+
+        self.chunk_embeddings = np.load(str(ef))
+        return True
 
 
 class MultiWikiKB:
-    def __init__(self):
+    def __init__(self, embedding_model: str = "BAAI/bge-small-zh-v1.5", hf_endpoint: str = ""):
+        self.embedding_model = embedding_model
+        self.hf_endpoint = hf_endpoint
         self.wikis: dict[str, WikiKB] = {}
         self.default_slug: str | None = None
         self._watcher_running = False
@@ -143,13 +176,9 @@ class MultiWikiKB:
                     name = meta["name"]
             except:
                 pass
-        kb = WikiKB(slug, name=name)
+        kb = WikiKB(slug, name=name, embedding_model=self.embedding_model, hf_endpoint=self.hf_endpoint)
         try:
-            if not kb.load_index():
-                kb.load()
-                kb.save_index()
-            else:
-                kb.load()
+            kb.load()
             self.wikis[slug] = kb
             return True
         except Exception as e:
@@ -178,36 +207,49 @@ class MultiWikiKB:
         return {"added": list(added), "modified": list(modified), "total": len(self.wikis), "wikis": self.list_wikis()}
 
     def start_watcher(self, interval=5.0):
-        if self._watcher_running: return
+        if self._watcher_running:
+            return
         self._watcher_running = True
+
         def _w():
             while self._watcher_running:
                 time.sleep(interval)
-                try: self._discover()
-                except: pass
-        t = threading.Thread(target=_w, daemon=True); t.start()
+                try:
+                    self._discover()
+                except:
+                    pass
 
-    def stop_watcher(self): self._watcher_running = False
+        t = threading.Thread(target=_w, daemon=True)
+        t.start()
+
+    def stop_watcher(self):
+        self._watcher_running = False
 
     def list_wikis(self) -> list[dict]:
         return [{"slug": s, "name": k.name, "pages": len(k.pages), "chunks": len(k.chunks)} for s, k in self.wikis.items()]
 
     def get(self, slug=None) -> WikiKB | None:
-        if slug and slug in self.wikis: return self.wikis[slug]
-        if self.default_slug and self.default_slug in self.wikis: return self.wikis[self.default_slug]
-        for kb in self.wikis.values(): return kb
+        if slug and slug in self.wikis:
+            return self.wikis[slug]
+        if self.default_slug and self.default_slug in self.wikis:
+            return self.wikis[self.default_slug]
+        for kb in self.wikis.values():
+            return kb
         return None
 
     def search(self, query, slug=None, top_k=15):
         kb = self.get(slug)
-        if kb is None: return [], ""
+        if kb is None:
+            return [], ""
         return kb.search(query, top_k=top_k), kb.name
 
 
 _mkb = None
-def get_kb():
+
+
+def get_kb(embedding_model: str = "BAAI/bge-small-zh-v1.5", hf_endpoint: str = "") -> MultiWikiKB:
     global _mkb
     if _mkb is None:
-        _mkb = MultiWikiKB()
+        _mkb = MultiWikiKB(embedding_model=embedding_model, hf_endpoint=hf_endpoint)
         _mkb.start_watcher(5.0)
     return _mkb
