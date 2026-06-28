@@ -16,13 +16,24 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+echo Python found:
+python --version
+echo.
+
 echo [1/3] Creating virtual environment...
 python -m venv venv
 call venv\Scripts\activate.bat
 
 echo [2/3] Installing dependencies...
-python -m pip install -q --upgrade pip
-pip install -q -r requirements.txt
+echo   This may take a few minutes...
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Install failed. Check your internet connection.
+    pause
+    exit /b 1
+)
 
 echo [3/3] Done!
 echo.
@@ -33,7 +44,4 @@ echo   Edit config.yaml to set your API key
 echo   Then double-click start.bat
 echo ============================================
 echo.
-echo Open config.example.yaml now?
-set /p OPEN="Type y to open, anything else to skip: "
-if /i "%OPEN%"=="y" notepad config.example.yaml
 pause
