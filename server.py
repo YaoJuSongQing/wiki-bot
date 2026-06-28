@@ -229,7 +229,7 @@ async def ask(request: QuestionRequest):
         "Always respond in the same language as the user's question. "
         "Include specific facts, stats, or steps. Be thorough and helpful."
     )
-    user_prompt = f"Context:\n\n{'\\\\n\\\\n'.join(context_parts) if context_parts else '(No wiki results found — answer based on your knowledge and web search)'}\n\nQuestion: {request.question}\n\nAnswer:"
+    user_prompt = f"Context:\n\n" + "\n\n".join(context_parts) if context_parts else "Context: (No wiki results found — answer with web search)\n\n" + f"Question: {request.question}\n\nAnswer:"
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
