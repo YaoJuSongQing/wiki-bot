@@ -1,0 +1,15 @@
+# 朋友自己的配置，不要覆盖
+config.yaml
+
+# 数据文件太大，通过 scrape 或单独同步
+data/*.json
+data/*_index/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Windows
+Thumbs.db
+Desktop.ini
