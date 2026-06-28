@@ -161,7 +161,44 @@ async def ask(request: QuestionRequest):
         if any(t in q for t in triggers):
             return AnswerResponse(question=request.question, wiki=kb.name, answer=answer, sources=[])
 
-    chunks = kb.search(request.question, top_k=15)  # Get more candidates
+    # ── Query expansion: generate keyword variations for better retrieval ──
+    queries = [request.question]
+    if API_KEY and len(request.question) > 3:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                qe_resp = await client.post(
+                    f"{API_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={"model": MODEL, "messages": [
+                        {"role": "system", "content": (
+                            "You are a search query optimizer for a wiki knowledge base. "
+                            "Given a user question, output 3-5 keyword search queries (one per line) "
+                            "that would retrieve the most relevant wiki pages. "
+                            "Use specific item names, game mechanics terms, and wiki-style phrasing. "
+                            "Do NOT answer the question — only output search queries."
+                        )},
+                        {"role": "user", "content": request.question}
+                    ], "temperature": 0, "max_tokens": 150},
+                )
+            if qe_resp.status_code == 200:
+                expanded = qe_resp.json()["choices"][0]["message"]["content"].strip()
+                for line in expanded.split("\n"):
+                    line = line.strip().lstrip("0123456789.-•* ").strip()
+                    if line and line not in queries and len(line) > 2:
+                        queries.append(line)
+        except Exception:
+            pass
+
+    # Search with all queries, merge + deduplicate
+    all_chunks = []
+    seen_keys = set()
+    for q in queries[:5]:
+        for c in kb.search(q, top_k=10):
+            key = c["page"] + c["section"]
+            if key not in seen_keys:
+                seen_keys.add(key)
+                all_chunks.append(c)
+    chunks = all_chunks[:30]  # Get more candidates for rerank
 
     # Chinese/CJK: translate and merge results
     has_cjk = bool(re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', request.question))
@@ -185,7 +222,7 @@ async def ask(request: QuestionRequest):
                 if key not in seen:
                     seen.add(key)
                     merged.append(c)
-            chunks = merged[:15]
+            chunks = merged[:25]
 
     if not chunks:
         # Still ask LLM with web search — it can search itself
