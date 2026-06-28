@@ -1,32 +1,41 @@
 @echo off
-chcp 65001 >nul
-title WikiBot æ›´æ–°
+title WikiBot ¸üÐÂ
 cd /d "%~dp0"
 
 echo ============================================
-echo   WikiBot è‡ªåŠ¨æ›´æ–°
+echo   WikiBot ×Ô¶¯¸üÐÂ
 echo ============================================
 echo.
 
-REM Check git
-where git >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [é”™è¯¯] æœªå®‰è£… Gitï¼Œè¯·å…ˆå®‰è£… https://git-scm.com/
-    pause
-    exit /b 1
+REM ±¸·Ý config.yaml
+echo [1/3] ±¸·ÝÅäÖÃ...
+copy /y "config.yaml" "%TEMP%\wikibot_config.yaml" >nul 2>&1
+
+REM ÏÂÔØ×îÐÂ°æ
+echo [2/3] ÏÂÔØ×îÐÂ°æ±¾...
+cd ..
+powershell -Command "Invoke-WebRequest -Uri 'https://github.com/YaoJuSongQing/wiki-bot/archive/refs/heads/main.zip' -OutFile 'wikibot_update.zip'"
+powershell -Command "Expand-Archive -Force -Path 'wikibot_update.zip' -DestinationPath '.'"
+del "wikibot_update.zip"
+
+REM Ö»¸²¸Ç´úÂë£¬±£Áô data ºÍ venv
+echo [3/3] ¸üÐÂ´úÂë...
+xcopy /e /y /q "wiki-bot-main\*.py" "WikiBot\"
+xcopy /e /y /q "wiki-bot-main\*.txt" "WikiBot\"
+xcopy /e /y /q "wiki-bot-main\*.bat" "WikiBot\"
+xcopy /e /y /q "wiki-bot-main\config.example.yaml" "WikiBot\"
+if exist "wiki-bot-main\VERSION" copy /y "wiki-bot-main\VERSION" "WikiBot\" >nul
+rmdir /s /q "wiki-bot-main"
+
+REM »Ö¸´ÅäÖÃ
+cd WikiBot
+if exist "%TEMP%\wikibot_config.yaml" (
+    copy /y "%TEMP%\wikibot_config.yaml" "config.yaml" >nul
 )
 
-echo æ­£åœ¨ä»Ž GitHub æ‹‰å–æœ€æ–°ç‰ˆæœ¬...
-echo.
-
-REM Stash local changes (protects config.yaml)
-git stash 2>nul
-git pull origin main
-git stash pop 2>nul
-
 echo.
 echo ============================================
-echo   æ›´æ–°å®Œæˆï¼
-echo   å¦‚æžœæœåŠ¡æ­£åœ¨è¿è¡Œï¼ŒæŒ‰ Ctrl+C åŽé‡æ–°å¯åŠ¨
+echo   ¸üÐÂÍê³É£¡
+echo   Èç¹û·þÎñÕýÔÚÔËÐÐ£¬°´ Ctrl+C ºóÖØÐÂÆô¶¯
 echo ============================================
 pause
