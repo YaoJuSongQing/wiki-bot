@@ -7,16 +7,16 @@ echo   WikiBot Update
 echo ============================================
 echo.
 
-echo [1/3] Backing up config...
+echo [1/4] Backing up config...
 copy /y "config.yaml" "%TEMP%\wikibot_config.yaml" >nul 2>&1
 
-echo [2/3] Downloading latest version...
+echo [2/4] Downloading latest version...
 cd ..
 powershell -Command "Invoke-WebRequest -Uri 'https://github.com/YaoJuSongQing/wiki-bot/archive/refs/heads/main.zip' -OutFile 'wikibot_update.zip'"
 powershell -Command "Expand-Archive -Force -Path 'wikibot_update.zip' -DestinationPath '.'"
 del "wikibot_update.zip"
 
-echo [3/3] Updating files...
+echo [3/4] Updating files...
 xcopy /e /y /q "wiki-bot-main\*.py" "WikiBot\"
 xcopy /e /y /q "wiki-bot-main\*.txt" "WikiBot\"
 xcopy /e /y /q "wiki-bot-main\*.bat" "WikiBot\"
@@ -30,6 +30,15 @@ rmdir /s /q "wiki-bot-main"
 cd WikiBot
 if exist "%TEMP%\wikibot_config.yaml" (
     copy /y "%TEMP%\wikibot_config.yaml" "config.yaml" >nul
+)
+
+echo [4/4] Updating dependencies...
+if exist "venv\Scripts\activate.bat" (
+    call venv\Scripts\activate.bat
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+) else (
+    echo   No venv found, skipping dependency update
 )
 
 echo.
