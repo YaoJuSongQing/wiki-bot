@@ -14,6 +14,9 @@ if exist "venv\Scripts\activate.bat" (
     exit /b 1
 )
 
+echo Opening browser at http://localhost:8080 ...
+start "" http://localhost:8080
+
 python server.py
 
 echo.
