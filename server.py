@@ -265,6 +265,7 @@ async def ask(request: QuestionRequest):
         "If the wiki context doesn't fully answer the question, use web search to supplement your knowledge. "
         "CRITICAL: YOU MUST respond in the SAME LANGUAGE as the user's question. "
         "If the user asks in Chinese, answer in Chinese. If in English, answer in English. "
+        "When using information from wiki context, cite the source page inline like 【来源：Page Name】. "
         "Include specific facts, stats, or steps. Be thorough and helpful."
     )
     user_prompt = f"Context:\n\n" + "\n\n".join(context_parts) if context_parts else "Context: (No wiki results found — answer with web search)\n\n" + f"Question: {request.question}\n\nAnswer (must be in the same language as the question):"
