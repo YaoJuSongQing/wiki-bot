@@ -14,6 +14,7 @@ except ImportError:
 import re
 from pathlib import Path
 import yaml
+import json as json_module
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,6 +82,7 @@ class QuestionRequest(BaseModel):
     wiki: str | None = None   # wiki slug, e.g. "isaac"
     top_k: int = 8
     history: list[dict] = []  # [{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
+    stream: bool = False       # SSE streaming for Web UI
 
 class RelevantChunk(BaseModel):
     page: str
@@ -336,9 +338,15 @@ async def ask(request: QuestionRequest):
                     sources=[]
                 )
 
-    # ── Query expansion: generate keyword variations for better retrieval ──
+    # ── Query expansion + CJK translation (parallel) ──────────
+    import asyncio
     queries = [request.question]
-    if API_KEY and len(request.question) > 3:
+    has_cjk = bool(re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', request.question))
+    en_query = None
+
+    async def expand_query():
+        if not API_KEY or len(request.question) <= 3:
+            return
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 qe_resp = await client.post(
@@ -364,6 +372,28 @@ async def ask(request: QuestionRequest):
         except Exception:
             pass
 
+    async def translate_query():
+        nonlocal en_query
+        if not (has_cjk and API_KEY):
+            return
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                tr_resp = await client.post(
+                    f"{API_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={"model": MODEL, "messages": [
+                        {"role": "system", "content": "Translate to English. Keep proper nouns in original form. Output ONLY translation."},
+                        {"role": "user", "content": request.question}
+                    ], "temperature": 0, "max_tokens": 100},
+                )
+            if tr_resp.status_code == 200:
+                en_query = tr_resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception:
+            pass
+
+    # Run both in parallel — they're independent
+    await asyncio.gather(expand_query(), translate_query())
+
     # Search with all queries, merge + deduplicate
     all_chunks = []
     seen_keys = set()
@@ -373,31 +403,19 @@ async def ask(request: QuestionRequest):
             if key not in seen_keys:
                 seen_keys.add(key)
                 all_chunks.append(c)
-    chunks = all_chunks[:30]  # Get more candidates for rerank
+    chunks = all_chunks[:30]
 
-    # Chinese/CJK: translate and merge results
-    has_cjk = bool(re.search(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', request.question))
-    if has_cjk and API_KEY:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            tr_resp = await client.post(
-                f"{API_BASE}/chat/completions",
-                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-                json={"model": MODEL, "messages": [
-                    {"role": "system", "content": "Translate to English. Keep proper nouns in original form. Output ONLY translation."},
-                    {"role": "user", "content": request.question}
-                ], "temperature": 0, "max_tokens": 100},
-            )
-        if tr_resp.status_code == 200:
-            en_query = tr_resp.json()["choices"][0]["message"]["content"].strip()
-            en_chunks = kb.search(en_query, top_k=15)
-            seen = set()
-            merged = []
-            for c in en_chunks + chunks:
-                key = c["page"] + c["section"]
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(c)
-            chunks = merged[:25]
+    # Merge English search results if translation succeeded
+    if en_query:
+        en_chunks = kb.search(en_query, top_k=15)
+        seen = set()
+        merged = []
+        for c in en_chunks + chunks:
+            key = c["page"] + c["section"]
+            if key not in seen:
+                seen.add(key)
+                merged.append(c)
+        chunks = merged[:25]
 
     if not chunks:
         # Still ask LLM with web search — it can search itself
@@ -466,6 +484,44 @@ async def ask(request: QuestionRequest):
 
     messages = [{"role": "system", "content": sp}] + request.history + [{"role": "user", "content": user_prompt}]
 
+    if request.stream:
+        # ── SSE streaming ─────────────────────────────────
+        from fastapi.responses import StreamingResponse
+        import asyncio
+
+        async def generate():
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{API_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                    json={"model": MODEL, "messages": messages, "temperature": 0.3,
+                          "max_tokens": 2000, "enable_search": True, "stream": True},
+                ) as resp:
+                    if resp.status_code != 200:
+                        yield f"data: {{\"error\":\"LLM API error: {resp.status_code}\"}}\n\n"
+                        return
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data.strip() == "[DONE]":
+                                break
+                            try:
+                                chunk = json_module.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    yield f"data: {{\"token\":{json_module.dumps(content)}}}\n\n"
+                            except Exception:
+                                pass
+            # Send sources at the end
+            srcs = [{"page": c["page"], "section": c["section"],
+                     "text": c["text"][:500], "score": c["score"]} for c in chunks]
+            yield f"data: {{\"done\":true,\"sources\":{json_module.dumps(srcs, ensure_ascii=False)}}}\n\n"
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
+    # ── Non-streaming (API compat) ────────────────────────
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             f"{API_BASE}/chat/completions",
@@ -634,19 +690,49 @@ async function ask() {{
   const btn = document.getElementById('sendBtn');
   const q = input.value.trim();
   if (!q) return;
-  input.value = ''; btn.disabled = true; btn.innerHTML = 'Sending...<span class=\"loading\"></span>';
+  input.value = ''; btn.disabled = true; btn.innerHTML = '...<span class=\"loading\"></span>';
   const msgs = document.getElementById('messages');
   msgs.innerHTML += '<div class=\"msg user\">' + esc(q) + '</div>';
+  const botDiv = document.createElement('div');
+  botDiv.className = 'msg bot';
+  botDiv.innerHTML = '<span class=\"loading\"></span>';
+  msgs.appendChild(botDiv);
+  let fullAnswer = '';
   try {{
-    const resp = await fetch('/ask', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{question:q,wiki:currentWiki,history:chatHistory}})}});
-    const data = await resp.json();
-    let src = data.sources && data.sources.length ? '<div class=\"src\">Sources: '+data.sources.map(s=>s.page).join(', ')+'</div>' : '';
-    msgs.innerHTML += '<div class=\"msg bot\">' + fmt(data.answer) + src + '</div>';
+    const resp = await fetch('/ask', {{method:'POST',headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{question:q,wiki:currentWiki,history:chatHistory,stream:true}})}});
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {{
+      const {{done, value}} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {{stream: true}});
+      const lines = buffer.split('\\n');
+      buffer = lines.pop();
+      for (const line of lines) {{
+        if (line.startsWith('data: ')) {{
+          try {{
+            const data = JSON.parse(line.slice(6));
+            if (data.token) {{
+              fullAnswer += data.token;
+              botDiv.innerHTML = fmt(fullAnswer);
+            }} else if (data.done) {{
+              let src = data.sources && data.sources.length
+                ? '<div class=\\\"src\\\">Sources: '+data.sources.map(s=>s.page).join(', ')+'</div>' : '';
+              botDiv.innerHTML = fmt(fullAnswer) + src;
+            }} else if (data.error) {{
+              botDiv.innerHTML = '<span style=\\\"color:#e94560\\\">Error: '+esc(data.error)+'</span>';
+            }}
+          }} catch(e) {{}}
+        }}
+      }}
+    }}
     chatHistory.push({{role:'user',content:q}});
-    chatHistory.push({{role:'assistant',content:data.answer}});
+    chatHistory.push({{role:'assistant',content:fullAnswer}});
     if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
-  }} catch(e) {{ msgs.innerHTML += '<div class=\"msg bot\" style=\"color:#e94560\">Error: '+e.message+'</div>'; }}
-  btn.disabled = false; btn.innerHTML = 'Send'; msgs.scrollTop = msgs.scrollHeight;
+  }} catch(e) {{ botDiv.innerHTML = '<span style=\\\"color:#e94560\\\">Error: '+esc(e.message)+'</span>'; }}
+  btn.disabled = false; btn.innerHTML = '发送'; msgs.scrollTop = msgs.scrollHeight;
 }}
 function esc(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}
 function fmt(t){{return t.replace(/```(\\w*)\\n([\\s\\S]*?)```/g,'<pre><code>$2</code></pre>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\\n/g,'<br>')}}
