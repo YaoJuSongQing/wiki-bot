@@ -509,6 +509,8 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 .header .hint{{font-size:12px;color:#666;margin-left:auto}}
 .header button.add-btn{{padding:6px 12px;border-radius:6px;border:1px dashed #e94560;background:transparent;color:#e94560;font-size:12px;cursor:pointer;white-space:nowrap}}
 .header button.add-btn:hover{{background:#e94560;color:#fff}}
+.header button.refresh-btn{{padding:6px 10px;border-radius:6px;border:1px solid #0f3460;background:#1a1a2e;color:#888;font-size:12px;cursor:pointer;white-space:nowrap}}
+.header button.refresh-btn:hover{{color:#4fc3f7;border-color:#4fc3f7}}
 .chat{{flex:1;max-width:800px;width:100%;margin:0 auto;padding:20px;display:flex;flex-direction:column}}
 .messages{{flex:1;overflow-y:auto;margin-bottom:16px}}
 .msg{{margin-bottom:14px;padding:10px 14px;border-radius:8px;max-width:85%;line-height:1.6;font-size:14px}}
@@ -543,6 +545,7 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 <div class="header">
   <h1>📚 Wiki Q&A Bot</h1>
   <select id="wikiSelect" onchange="switchWiki()">{wiki_opts}</select>
+  <button class="refresh-btn" onclick="refreshWiki()" title="重新爬取所有Wiki">🔄 更新</button>
   <button class="add-btn" onclick="toggleScrapeForm()">+ 添加Wiki</button>
   <span class="hint">按 Enter 发送</span>
 </div>
@@ -605,6 +608,25 @@ async function scrapeWiki() {{
     status.className = 'status error';
     status.textContent = 'Network error: ' + e.message;
   }}
+}}
+async function refreshWiki() {{
+  const btn = document.querySelector('.refresh-btn');
+  btn.textContent = '⏳ 更新中...';
+  btn.disabled = true;
+  try {{
+    const resp = await fetch('/update', {{method:'POST'}});
+    const data = await resp.json();
+    if (data.ok) {{
+      alert('更新完成! ' + (data.changes || ''));
+      location.reload();
+    }} else {{
+      alert('更新失败: ' + (data.error || '未知错误'));
+    }}
+  }} catch(e) {{
+    alert('Network error: ' + e.message);
+  }}
+  btn.textContent = '🔄 更新';
+  btn.disabled = false;
 }}
 let chatHistory = [];
 async function ask() {{
