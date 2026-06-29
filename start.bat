@@ -25,7 +25,7 @@ start "WikiBot Server" /min cmd /c "cd /d %~dp0 && set SSL_CERT_FILE=%SSL_CERT_F
 echo Waiting for server to be ready...
 :wait
 timeout /t 3 /nobreak >nul
-powershell -Command "try {$r=Invoke-WebRequest -Uri 'http://localhost:8080' -TimeoutSec 2; exit 0} catch {exit 1}" >nul 2>&1
+powershell -Command "try {$r=Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8080' -TimeoutSec 3; exit 0} catch {exit 1}" >nul 2>&1
 if errorlevel 1 goto wait
 
 start "" http://localhost:8080
