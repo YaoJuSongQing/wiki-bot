@@ -46,6 +46,14 @@ HF_ENDPOINT = (emb_cfg.get("hf_endpoint", "") or "https://hf-mirror.com").strip(
 HOST = srv_cfg.get("host", "0.0.0.0")
 PORT = int(srv_cfg.get("port", 8080))
 
+# ── Wiki URL map (slug → url) for empty-wiki fallback ─────────
+_wiki_urls: dict[str, str] = {}
+for _w in config.get("wikis", []) or []:
+    _s = _w.get("slug", "") or re.sub(r'[^a-z0-9]+', '_', _w.get("name", "").lower().strip()).strip('_')
+    _u = _w.get("url", "")
+    if _s and _u:
+        _wiki_urls[_s] = _u.rstrip("/")
+
 # ── App ──────────────────────────────────────────────────────
 from contextlib import asynccontextmanager
 
@@ -430,10 +438,23 @@ async def ask(request: QuestionRequest):
         else:
             context_parts.append(f"--- {c['page']} | {c['section']} ---\n{c['text']}")
 
+    # ── System prompt: if wiki is empty, guide LLM to search its website ──
+    wiki_url_hint = ""
+    if len(kb.pages) == 0:
+        wiki_url = _wiki_urls.get(request.wiki or "", config.get("wiki", {}).get("url", "").rstrip("/"))
+        if wiki_url:
+            wiki_url_hint = (
+                f" IMPORTANT: {kb.name}'s local data is currently empty. "
+                f"You MUST use web search to answer. "
+                f"Try searching the wiki directly: site:{wiki_url} — this is the official wiki website. "
+                f"Another option: search \"{kb.name} wiki\" or specific topic + \"wiki\". "
+            )
+
     sp = (
         f"You are a knowledgeable Q&A bot for {kb.name}. "
         "First, answer using the wiki context provided below. "
         "If the wiki context doesn't fully answer the question, use web search to supplement your knowledge. "
+        + wiki_url_hint +
         "CRITICAL: YOU MUST respond in the SAME LANGUAGE as the user's question. "
         "If the user asks in Chinese, answer in Chinese. If in English, answer in English. "
         "When using information from wiki context, cite the source page inline like 【来源：Page Name】. "
