@@ -12,9 +12,11 @@ copy /y "config.yaml" "%TEMP%\wikibot_config.yaml" >nul 2>&1
 
 echo [2/4] Downloading latest version...
 cd ..
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/YaoJuSongQing/wiki-bot/archive/refs/heads/main.zip' -OutFile 'wikibot_update.zip' } catch { Write-Host 'Download failed! Manually download:' -ForegroundColor Red; Write-Host '  https://github.com/YaoJuSongQing/wiki-bot/archive/refs/heads/main.zip' -ForegroundColor Yellow; Write-Host 'Extract it and copy files into WikiBot folder.' -ForegroundColor Yellow; exit 1 }"
+certutil -urlcache -split -f "https://github.com/YaoJuSongQing/wiki-bot/archive/refs/heads/main.zip" wikibot_update.zip >nul 2>&1
 if not exist "wikibot_update.zip" (
-    echo [ERROR] Download failed. Check the manual link above.
+    echo [ERROR] Download failed.
+    echo   Manual download: https://github.com/YaoJuSongQing/wiki-bot/archive/refs/heads/main.zip
+    echo   Extract all files into the WikiBot folder, then double-click update.bat again.
     pause
     exit /b 1
 )
