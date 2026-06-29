@@ -143,20 +143,47 @@ async def reload_wikis():
 
 @app.post("/update")
 async def update_wiki():
-    """Trigger wiki re-scrape from config.yaml, then reload."""
+    """Pull latest code + re-scrape wikis, then reload."""
     import subprocess
+    import os
+
+    project_dir = str(Path(__file__).parent)
+    output_parts = []
+
+    # 1. Pull latest code (if git repo)
+    git_dir = os.path.join(project_dir, ".git")
+    if os.path.isdir(git_dir):
+        try:
+            git_result = subprocess.run(
+                ["git", "-C", project_dir, "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=30,
+            )
+            pulled = git_result.stdout.strip()
+            if "Already up to date" in pulled:
+                output_parts.append("[code] Already up to date")
+            elif pulled:
+                output_parts.append(f"[code] Updated:\n{pulled[-300:]}")
+            if git_result.returncode != 0 and git_result.stderr.strip():
+                output_parts.append(f"[code] git pull warning: {git_result.stderr.strip()[-200:]}")
+        except Exception as e:
+            output_parts.append(f"[code] git pull failed: {e}")
+
+    # 2. Re-scrape wikis
     result = subprocess.run(
-        ["python3", str(Path(__file__).parent / "scrape_wiki.py")],
+        ["python3", os.path.join(project_dir, "scrape_wiki.py")],
         capture_output=True, text=True, timeout=300,
-        cwd=str(Path(__file__).parent),
+        cwd=project_dir,
     )
     if result.returncode != 0:
-        return {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
+        output_parts.append(f"[scrape] FAILED: {result.stderr.strip() or result.stdout.strip()}")
+        return {"ok": False, "error": "\n".join(output_parts)}
 
-    # Reload after scrape
+    output_parts.append(f"[scrape] {result.stdout.strip()[-300:]}")
+
+    # 3. Reload KB
     mkb = get_kb()
     changes = mkb.reload()
-    return {"ok": True, "output": result.stdout.strip()[-500:], "changes": changes}
+    return {"ok": True, "output": "\n".join(output_parts), "changes": changes}
 
 
 class MemoryRequest(BaseModel):
