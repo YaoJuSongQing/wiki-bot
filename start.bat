@@ -15,7 +15,12 @@ if exist "venv\Scripts\activate.bat" (
 )
 
 echo Starting server (takes ~30s first time)...
-start "WikiBot Server" /min cmd /c "cd /d %~dp0 && venv\Scripts\python.exe server.py"
+
+REM Fix SSL + HuggingFace mirror for Windows users
+for /f "delims=" %%i in ('venv\Scripts\python.exe -c "import certifi; print(certifi.where())" 2^>nul') do set SSL_CERT_FILE=%%i
+set HF_ENDPOINT=https://hf-mirror.com
+
+start "WikiBot Server" /min cmd /c "cd /d %~dp0 && set SSL_CERT_FILE=%SSL_CERT_FILE% && set HF_ENDPOINT=%HF_ENDPOINT% && venv\Scripts\python.exe server.py"
 
 echo Waiting for server to be ready...
 :wait
