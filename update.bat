@@ -22,9 +22,7 @@ xcopy /e /y /q "wiki-bot-main\*.txt" "WikiBot\"
 xcopy /e /y /q "wiki-bot-main\*.bat" "WikiBot\"
 xcopy /e /y /q "wiki-bot-main\config.example.yaml" "WikiBot\"
 if exist "wiki-bot-main\VERSION" copy /y "wiki-bot-main\VERSION" "WikiBot\" >nul
-REM Sync data files (delete old, copy new)
-del /q "WikiBot\data\*.json" 2>nul
-xcopy /e /y /q "wiki-bot-main\data\*.json" "WikiBot\data\"
+REM Data files (.json) are NOT synced — users scrape their own wikis
 rmdir /s /q "wiki-bot-main"
 
 cd WikiBot

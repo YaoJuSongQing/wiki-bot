@@ -15,6 +15,9 @@ from pydantic import BaseModel
 import httpx
 
 from knowledge_base import get_kb
+from scrape_wiki import scrape_mediawiki, scrape_sphinx, scrape_generic
+import ssl
+import urllib.request
 
 # ── Load config ──────────────────────────────────────────────
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -47,6 +50,9 @@ async def lifespan(app: FastAPI):
         mkb.search("warmup", top_k=1)
     except:
         pass
+    print("\n" + "="*50)
+    print("  WikiBot ready! Open http://localhost:8080")
+    print("="*50 + "\n")
     yield
 
 
@@ -71,6 +77,13 @@ class AnswerResponse(BaseModel):
     wiki: str
     answer: str
     sources: list[RelevantChunk]
+
+
+class ScrapeRequest(BaseModel):
+    url: str
+    type: str   # "mediawiki", "sphinx", or "generic"
+    name: str
+    slug: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -126,6 +139,84 @@ async def update_wiki():
     mkb = get_kb()
     changes = mkb.reload()
     return {"ok": True, "output": result.stdout.strip()[-500:], "changes": changes}
+
+
+@app.post("/scrape")
+async def scrape_wiki_endpoint(request: ScrapeRequest):
+    """Add a new wiki: scrape it, save JSON, and reload KB."""
+    import json as json_module
+
+    wiki_type = request.type.strip().lower()
+    wiki_url = request.url.strip().rstrip("/")
+    wiki_name = request.name.strip()
+
+    if not wiki_url or not wiki_name:
+        return {"ok": False, "error": "url and name are required"}
+
+    # Auto-generate slug from name
+    slug = (request.slug or "").strip()
+    if not slug:
+        slug = re.sub(r'[^a-z0-9]+', '_', wiki_name.lower().strip()).strip('_')
+
+    ctx = ssl.create_default_context()
+
+    try:
+        if wiki_type == "mediawiki":
+            # Auto-detect API URL
+            api_url = ""
+            for suffix in ["/api.php", "/w/api.php"]:
+                test_url = wiki_url + suffix
+                try:
+                    req = urllib.request.Request(test_url, headers={"User-Agent": "WikiBot/3.0"})
+                    urllib.request.urlopen(req, context=ctx, timeout=10)
+                    api_url = test_url
+                    break
+                except Exception:
+                    continue
+            if not api_url:
+                return {"ok": False, "error": f"Could not auto-detect MediaWiki API for {wiki_url}. Make sure it's a valid Fandom/Wikipedia URL."}
+            results = scrape_mediawiki(api_url, wiki_url)
+
+        elif wiki_type == "sphinx":
+            results = scrape_sphinx(wiki_url)
+
+        elif wiki_type == "generic":
+            results = scrape_generic([wiki_url])
+
+        else:
+            return {"ok": False, "error": f"Unknown wiki type: {wiki_type}. Use mediawiki, sphinx, or generic."}
+
+    except Exception as e:
+        return {"ok": False, "error": f"Scrape failed: {e}"}
+
+    if not results:
+        return {"ok": False, "error": "No pages scraped. Check the URL and wiki type."}
+
+    # Save data/{slug}.json
+    output = Path(__file__).parent / "data" / f"{slug}.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, "w", encoding="utf-8") as f:
+        json_module.dump(results, f, ensure_ascii=False)
+
+    # Save data/{slug}.meta.json
+    meta_path = Path(__file__).parent / "data" / f"{slug}.meta.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json_module.dump({"name": wiki_name}, f, ensure_ascii=False)
+
+    total_chars = sum(len(v) for v in results.values())
+
+    # Hot reload
+    mkb = get_kb()
+    changes = mkb.reload()
+
+    return {
+        "ok": True,
+        "slug": slug,
+        "name": wiki_name,
+        "pages": len(results),
+        "total_chars": total_chars,
+        "changes": changes,
+    }
 
 
 @app.get("/info")
@@ -315,6 +406,8 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 .header h1{{font-size:18px;color:#e94560;white-space:nowrap}}
 .header select{{padding:6px 10px;border-radius:6px;border:1px solid #0f3460;background:#1a1a2e;color:#e0e0e0;font-size:13px;cursor:pointer}}
 .header .hint{{font-size:12px;color:#666;margin-left:auto}}
+.header button.add-btn{{padding:6px 12px;border-radius:6px;border:1px dashed #e94560;background:transparent;color:#e94560;font-size:12px;cursor:pointer;white-space:nowrap}}
+.header button.add-btn:hover{{background:#e94560;color:#fff}}
 .chat{{flex:1;max-width:800px;width:100%;margin:0 auto;padding:20px;display:flex;flex-direction:column}}
 .messages{{flex:1;overflow-y:auto;margin-bottom:16px}}
 .msg{{margin-bottom:14px;padding:10px 14px;border-radius:8px;max-width:85%;line-height:1.6;font-size:14px}}
@@ -331,32 +424,93 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 .input-area button:disabled{{opacity:.5;cursor:not-allowed}}
 .loading{{display:inline-block;width:8px;height:8px;border-radius:50%;background:#e94560;animation:blink 1s infinite;margin-left:6px}}
 @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+.scrape-form{{display:none;background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px;margin:10px 20px 0 20px;max-width:800px;width:calc(100%-40px);align-self:center}}
+.scrape-form.show{{display:block}}
+.scrape-form h3{{font-size:14px;color:#e94560;margin-bottom:10px}}
+.scrape-form .row{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}}
+.scrape-form input,.scrape-form select{{padding:8px 12px;border-radius:6px;border:1px solid #0f3460;background:#1a1a2e;color:#e0e0e0;font-size:13px;flex:1;min-width:120px}}
+.scrape-form input:focus,.scrape-form select:focus{{border-color:#e94560;outline:none}}
+.scrape-form button{{padding:8px 20px;border-radius:6px;border:none;background:#e94560;color:white;font-size:13px;cursor:pointer;font-weight:600}}
+.scrape-form button:hover{{background:#c73852}}
+.scrape-form button.cancel{{background:transparent;border:1px solid #666;color:#999;margin-left:8px}}
+.scrape-form button.cancel:hover{{color:#fff;border-color:#999}}
+.scrape-form .status{{font-size:12px;color:#4caf50;margin-top:6px;display:none}}
+.scrape-form .status.error{{color:#e94560}}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>📚 Wiki Q&A Bot</h1>
   <select id="wikiSelect" onchange="switchWiki()">{wiki_opts}</select>
-  <span class="hint">按 Enter 发送</span>
+  <button class="add-btn" onclick="toggleScrapeForm()">+ Add Wiki</button>
+  <span class="hint">Enter to send</span>
+</div>
+<div class="scrape-form" id="scrapeForm">
+  <h3>Add a New Wiki</h3>
+  <div class="row">
+    <input id="scrapeUrl" placeholder="Wiki URL (e.g. https://mysite.fandom.com/wiki/)" style="flex:2">
+    <select id="scrapeType">
+      <option value="mediawiki">MediaWiki (Fandom/Wikipedia)</option>
+      <option value="sphinx">Sphinx / ReadTheDocs</option>
+      <option value="generic">Generic (single page)</option>
+    </select>
+  </div>
+  <div class="row">
+    <input id="scrapeName" placeholder="Display name (e.g. My Wiki)">
+    <input id="scrapeSlug" placeholder="Slug (auto-generated, optional)">
+  </div>
+  <button onclick="scrapeWiki()">Scrape</button>
+  <button class="cancel" onclick="toggleScrapeForm()">Cancel</button>
+  <div class="status" id="scrapeStatus"></div>
 </div>
 <div class="chat">
   <div class="messages" id="messages">
-    <div class="msg bot">你好！已加载 <b>{first_name}</b>。选一个 wiki，输入问题即可查询。</div>
+    <div class="msg bot">Hello! Loaded <b>{first_name}</b>. Select a wiki above, then ask a question.<br>Click <b>+ Add Wiki</b> to scrape your own wiki.</div>
   </div>
   <div class="input-area">
-    <input id="question" placeholder="输入你的问题…" onkeydown="if(event.key==='Enter')ask()">
-    <button id="sendBtn" onclick="ask()">发送</button>
+    <input id="question" placeholder="Ask a question..." onkeydown="if(event.key==='Enter')ask()">
+    <button id="sendBtn" onclick="ask()">Send</button>
   </div>
 </div>
 <script>
 let currentWiki = '{wikis[0]["slug"] if wikis else ""}';
 function switchWiki() {{ currentWiki = document.getElementById('wikiSelect').value; }}
+function toggleScrapeForm() {{
+  const f = document.getElementById('scrapeForm');
+  f.classList.toggle('show');
+  document.getElementById('scrapeStatus').style.display = 'none';
+}}
+async function scrapeWiki() {{
+  const url = document.getElementById('scrapeUrl').value.trim();
+  const type = document.getElementById('scrapeType').value;
+  const name = document.getElementById('scrapeName').value.trim();
+  const slug = document.getElementById('scrapeSlug').value.trim();
+  const status = document.getElementById('scrapeStatus');
+
+  if (!url || !name) {{ status.style.display = 'block'; status.className = 'status error'; status.textContent = 'URL and Name are required.'; return; }}
+
+  status.style.display = 'block'; status.className = 'status'; status.textContent = 'Scraping... this may take a while.';
+  try {{
+    const resp = await fetch('/scrape', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url,type,name,slug}})}});
+    const data = await resp.json();
+    if (data.ok) {{
+      status.textContent = 'Done! '+data.name+': '+data.pages+' pages, '+Math.round(data.total_chars/1000)+'k chars. Reloading page...';
+      setTimeout(() => location.reload(), 2000);
+    }} else {{
+      status.className = 'status error';
+      status.textContent = 'Error: ' + data.error;
+    }}
+  }} catch(e) {{
+    status.className = 'status error';
+    status.textContent = 'Network error: ' + e.message;
+  }}
+}}
 async function ask() {{
   const input = document.getElementById('question');
   const btn = document.getElementById('sendBtn');
   const q = input.value.trim();
   if (!q) return;
-  input.value = ''; btn.disabled = true; btn.innerHTML = '发送中<span class="loading"></span>';
+  input.value = ''; btn.disabled = true; btn.innerHTML = 'Sending...<span class="loading"></span>';
   const msgs = document.getElementById('messages');
   msgs.innerHTML += '<div class="msg user">' + esc(q) + '</div>';
   try {{
@@ -365,7 +519,7 @@ async function ask() {{
     let src = data.sources && data.sources.length ? '<div class="src">Sources: '+data.sources.map(s=>s.page).join(', ')+'</div>' : '';
     msgs.innerHTML += '<div class="msg bot">' + fmt(data.answer) + src + '</div>';
   }} catch(e) {{ msgs.innerHTML += '<div class="msg bot" style="color:#e94560">Error: '+e.message+'</div>'; }}
-  btn.disabled = false; btn.innerHTML = '发送'; msgs.scrollTop = msgs.scrollHeight;
+  btn.disabled = false; btn.innerHTML = 'Send'; msgs.scrollTop = msgs.scrollHeight;
 }}
 function esc(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}
 function fmt(t){{return t.replace(/```(\\w*)\\n([\\s\\S]*?)```/g,'<pre><code>$2</code></pre>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\\n/g,'<br>')}}
