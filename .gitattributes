@@ -1,1 +1,2 @@
-*.bat text eol=crlf
+# .bat files must use CRLF — Windows cmd.exe breaks with LF
+*.bat -text
