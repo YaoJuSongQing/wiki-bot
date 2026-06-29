@@ -141,6 +141,14 @@ async def update_wiki():
     return {"ok": True, "output": result.stdout.strip()[-500:], "changes": changes}
 
 
+class MemoryRequest(BaseModel):
+    wiki: str
+    page: str = ""
+    section: str = ""
+    text: str
+    mem_type: str = "note"  # "note" or "correction"
+
+
 @app.post("/scrape")
 async def scrape_wiki_endpoint(request: ScrapeRequest):
     """Add a new wiki: scrape it, save JSON, and reload KB."""
@@ -219,18 +227,45 @@ async def scrape_wiki_endpoint(request: ScrapeRequest):
     }
 
 
+@app.post("/memory")
+async def save_memory(request: MemoryRequest):
+    """Save a user memory entry (note or correction) to a wiki."""
+    mkb = get_kb()
+    try:
+        if not request.text.strip():
+            return {"ok": False, "error": "text is required"}
+        entry = mkb.add_memory(
+            request.wiki, request.page, request.section,
+            request.text.strip(), request.mem_type
+        )
+        return {
+            "ok": True,
+            "wiki": request.wiki,
+            "memory_id": len(mkb.wikis[request.wiki].memory_entries),
+            "entry": entry,
+        }
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/info")
 async def system_info():
     """System info: which APIs loaded, costs, etc."""
     mkb = get_kb()
+    wikis = mkb.list_wikis()
+    # Add memory counts
+    for w in wikis:
+        kb = mkb.wikis.get(w["slug"])
+        if kb:
+            w["memory"] = kb.get_memory_count()
     return {
         "api_provider": "deepseek" if "deepseek" in API_BASE else "openai",
         "model": MODEL,
         "embedding_model": EMBEDDING_MODEL,
         "embedding_type": "dense (sentence-transformers)",
-        "cost_estimate": "≈¥0.002/question (DeepSeek: ¥1/M tokens, embedding: free/local)",
+        "cost_estimate": "≈¥0.008/question (DeepSeek: ¥1/M tokens, embedding: free/local)",
         "hot_reload": "enabled (5s polling, or POST /reload)",
-        "wikis": mkb.list_wikis(),
+        "wikis": wikis,
     }
 
 
@@ -261,6 +296,29 @@ async def ask(request: QuestionRequest):
     for triggers, answer in meta_patterns:
         if any(t in q for t in triggers):
             return AnswerResponse(question=request.question, wiki=kb.name, answer=answer, sources=[])
+
+    # ── Memory commands: "记住:/修正:" prefix ──────────────────
+    mem_match = re.match(r'^(记住|记下|记录|修正)[：:]\\s*(.+)', request.question.strip(), re.DOTALL)
+    if mem_match:
+        cmd_type = "correction" if mem_match.group(1) == "修正" else "note"
+        content = mem_match.group(2).strip()
+        if content:
+            try:
+                entry = mkb.add_memory(request.wiki or mkb.default_slug or "", "", "", content, cmd_type)
+                prefix = "修正" if cmd_type == "correction" else "记忆"
+                return AnswerResponse(
+                    question=request.question,
+                    wiki=kb.name,
+                    answer=f"✅ 已{prefix}：{content}\n\n（{kb.name} 的记忆条目总数：{kb.get_memory_count()}）",
+                    sources=[]
+                )
+            except Exception as e:
+                return AnswerResponse(
+                    question=request.question,
+                    wiki=kb.name,
+                    answer=f"❌ 保存失败：{e}",
+                    sources=[]
+                )
 
     # ── Query expansion: generate keyword variations for better retrieval ──
     queries = [request.question]
@@ -358,7 +416,11 @@ async def ask(request: QuestionRequest):
         key = (c["page"], c["section"])
         if key in seen: continue
         seen.add(key)
-        context_parts.append(f"--- {c['page']} | {c['section']} ---\n{c['text']}")
+        if c.get("source") == "memory":
+            tag = "用户修正" if c.get("mem_type") == "correction" else "用户记忆"
+            context_parts.append(f"--- [{tag}] {c['page']} | {c['section']} ---\n{c['text']}")
+        else:
+            context_parts.append(f"--- {c['page']} | {c['section']} ---\n{c['text']}")
 
     sp = (
         f"You are a knowledgeable Q&A bot for {kb.name}. "
@@ -367,6 +429,8 @@ async def ask(request: QuestionRequest):
         "CRITICAL: YOU MUST respond in the SAME LANGUAGE as the user's question. "
         "If the user asks in Chinese, answer in Chinese. If in English, answer in English. "
         "When using information from wiki context, cite the source page inline like 【来源：Page Name】. "
+        "Context entries marked [用户记忆] or [用户修正] are user-submitted content — "
+        "prioritize them over wiki content when they conflict, and cite them as 【用户记忆：Page Name】 or 【用户修正：Page Name】. "
         "Include specific facts, stats, or steps. Be thorough and helpful."
     )
     user_prompt = f"Context:\n\n" + "\n\n".join(context_parts) if context_parts else "Context: (No wiki results found — answer with web search)\n\n" + f"Question: {request.question}\n\nAnswer (must be in the same language as the question):"
@@ -391,7 +455,13 @@ async def ask(request: QuestionRequest):
 def _render_ui():
     mkb = get_kb()
     wikis = mkb.list_wikis()
-    wiki_opts = "\n".join(f'<option value="{w["slug"]}" {"selected" if i == 0 else ""}>{w["name"]} ({w["pages"]} pages)</option>' for i, w in enumerate(wikis))
+    wiki_opts = "\n".join(
+        f'<option value="{w["slug"]}" {"selected" if i == 0 else ""}>{w["name"]}'
+        f' ({w["pages"]}页'
+        f'{f", 记忆x{mkb.wikis[w["slug"]].get_memory_count()}" if mkb.wikis.get(w["slug"]) and mkb.wikis[w["slug"]].get_memory_count() > 0 else ""}'
+        f')</option>'
+        for i, w in enumerate(wikis)
+    )
     first_name = wikis[0]["name"] if wikis else "Wiki"
 
     return f"""<!DOCTYPE html>
@@ -465,7 +535,7 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 </div>
 <div class="chat">
   <div class="messages" id="messages">
-    <div class="msg bot">你好！已加载 <b>{first_name}</b>。选择一个 wiki，输入问题即可查询。<br>点击 <b>+ 添加Wiki</b> 可以爬取你自己的 wiki。</div>
+    <div class="msg bot">你好！已加载 <b>{first_name}</b>。选择一个 wiki，输入问题即可查询。<br>点击 <b>+ 添加Wiki</b> 爬取新 wiki。<br>输入 <b>记住：xxx</b> 或 <b>修正：xxx</b> 来保存你的知识。</div>
   </div>
   <div class="input-area">
     <input id="question" placeholder="输入你的问题…" onkeydown="if(event.key==='Enter')ask()">

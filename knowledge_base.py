@@ -36,9 +36,11 @@ class WikiKB:
         self.embedding_model = embedding_model
         self.hf_endpoint = hf_endpoint
         self.pages = {}
+        self.memory_entries = []  # user corrections/notes
         self.chunks = []
         self.chunk_embeddings = None  # np.ndarray (n_chunks, dim)
         self.data_file = DATA_DIR / f"{slug}.json"
+        self.memory_file = DATA_DIR / f"{slug}.memory.json"
         self.index_dir = DATA_DIR / f"{slug}_index"
         self._mtime = 0
 
@@ -48,6 +50,7 @@ class WikiKB:
         with open(self.data_file, "r", encoding="utf-8") as f:
             self.pages = json.load(f)
         self._mtime = self.data_file.stat().st_mtime
+        self._load_memory()
         self._chunk_pages()
 
         # Try loading cached embeddings first
@@ -62,8 +65,19 @@ class WikiKB:
             return False
         return self.data_file.stat().st_mtime > self._mtime
 
+    def _load_memory(self):
+        """Load user memory entries from disk."""
+        self.memory_entries = []
+        if self.memory_file.exists():
+            try:
+                with open(self.memory_file, "r", encoding="utf-8") as f:
+                    self.memory_entries = json.load(f)
+            except Exception:
+                self.memory_entries = []
+
     def _chunk_pages(self):
         self.chunks = []
+        # Wiki chunks
         for page_name, text in self.pages.items():
             sections = re.split(r'\n(?=## )', text)
             for sec in sections:
@@ -72,7 +86,48 @@ class WikiKB:
                     continue
                 header_match = re.match(r'## (.+)', sec)
                 section_title = header_match.group(1).strip() if header_match else page_name
-                self.chunks.append({"page": page_name, "section": section_title, "text": sec})
+                self.chunks.append({"page": page_name, "section": section_title, "text": sec, "source": "wiki"})
+
+        # Memory chunks (user corrections & notes)
+        for mem in self.memory_entries:
+            self.chunks.append({
+                "page": mem.get("page", ""),
+                "section": mem.get("section", ""),
+                "text": mem.get("text", ""),
+                "source": "memory",
+                "mem_type": mem.get("type", "note"),
+                "created_at": mem.get("created_at", ""),
+            })
+
+    def add_memory(self, page: str, section: str, text: str, mem_type: str = "note") -> dict:
+        """Add a user memory entry, save to disk, and rebuild embeddings."""
+        import datetime
+        import shutil
+
+        entry = {
+            "page": page,
+            "section": section,
+            "text": text,
+            "type": mem_type,
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        self.memory_entries.append(entry)
+
+        # Save to disk
+        with open(self.memory_file, "w", encoding="utf-8") as f:
+            json.dump(self.memory_entries, f, ensure_ascii=False, indent=2)
+
+        # Re-chunk and rebuild embeddings
+        self._chunk_pages()
+        if self.index_dir.exists():
+            shutil.rmtree(self.index_dir)
+        self._build_embeddings()
+        self._save_embeddings()
+
+        return entry
+
+    def get_memory_count(self) -> int:
+        return len(self.memory_entries)
 
     def _build_embeddings(self):
         """Generate dense embeddings for all chunks."""
@@ -155,7 +210,7 @@ class MultiWikiKB:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         for f in sorted(DATA_DIR.glob("*.json")):
             slug = f.stem
-            if slug in ("config",) or slug.endswith(".meta"):
+            if slug in ("config",) or slug.endswith(".meta") or slug.endswith(".memory"):
                 continue
             if slug in self.wikis:
                 if self.wikis[slug].is_stale():
@@ -242,6 +297,12 @@ class MultiWikiKB:
         if kb is None:
             return [], ""
         return kb.search(query, top_k=top_k), kb.name
+
+    def add_memory(self, slug: str, page: str, section: str, text: str, mem_type: str = "note") -> dict:
+        """Add a memory entry to a specific wiki and re-index."""
+        if slug not in self.wikis:
+            raise ValueError(f"Wiki '{slug}' not found")
+        return self.wikis[slug].add_memory(page, section, text, mem_type)
 
 
 _mkb = None
