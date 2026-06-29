@@ -442,34 +442,34 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 <div class="header">
   <h1>📚 Wiki Q&A Bot</h1>
   <select id="wikiSelect" onchange="switchWiki()">{wiki_opts}</select>
-  <button class="add-btn" onclick="toggleScrapeForm()">+ Add Wiki</button>
-  <span class="hint">Enter to send</span>
+  <button class="add-btn" onclick="toggleScrapeForm()">+ 添加Wiki</button>
+  <span class="hint">按 Enter 发送</span>
 </div>
 <div class="scrape-form" id="scrapeForm">
-  <h3>Add a New Wiki</h3>
+  <h3>添加新 Wiki</h3>
   <div class="row">
-    <input id="scrapeUrl" placeholder="Wiki URL (e.g. https://mysite.fandom.com/wiki/)" style="flex:2">
+    <input id="scrapeUrl" placeholder="Wiki URL (例: https://mysite.fandom.com/wiki/)" style="flex:2">
     <select id="scrapeType">
-      <option value="mediawiki">MediaWiki (Fandom/Wikipedia)</option>
+      <option value="mediawiki">MediaWiki (Fandom/维基百科)</option>
       <option value="sphinx">Sphinx / ReadTheDocs</option>
-      <option value="generic">Generic (single page)</option>
+      <option value="generic">通用 (单页面)</option>
     </select>
   </div>
   <div class="row">
-    <input id="scrapeName" placeholder="Display name (e.g. My Wiki)">
-    <input id="scrapeSlug" placeholder="Slug (auto-generated, optional)">
+    <input id="scrapeName" placeholder="显示名称 (例: 我的Wiki)">
+    <input id="scrapeSlug" placeholder="Slug (自动生成，可不填)">
   </div>
-  <button onclick="scrapeWiki()">Scrape</button>
-  <button class="cancel" onclick="toggleScrapeForm()">Cancel</button>
+  <button onclick="scrapeWiki()">开始爬取</button>
+  <button class="cancel" onclick="toggleScrapeForm()">取消</button>
   <div class="status" id="scrapeStatus"></div>
 </div>
 <div class="chat">
   <div class="messages" id="messages">
-    <div class="msg bot">Hello! Loaded <b>{first_name}</b>. Select a wiki above, then ask a question.<br>Click <b>+ Add Wiki</b> to scrape your own wiki.</div>
+    <div class="msg bot">你好！已加载 <b>{first_name}</b>。选择一个 wiki，输入问题即可查询。<br>点击 <b>+ 添加Wiki</b> 可以爬取你自己的 wiki。</div>
   </div>
   <div class="input-area">
-    <input id="question" placeholder="Ask a question..." onkeydown="if(event.key==='Enter')ask()">
-    <button id="sendBtn" onclick="ask()">Send</button>
+    <input id="question" placeholder="输入你的问题…" onkeydown="if(event.key==='Enter')ask()">
+    <button id="sendBtn" onclick="ask()">发送</button>
   </div>
 </div>
 <script>
@@ -489,16 +489,16 @@ async function scrapeWiki() {{
 
   if (!url || !name) {{ status.style.display = 'block'; status.className = 'status error'; status.textContent = 'URL and Name are required.'; return; }}
 
-  status.style.display = 'block'; status.className = 'status'; status.textContent = 'Scraping... this may take a while.';
+  status.style.display = 'block'; status.className = 'status'; status.textContent = '正在爬取... 可能需要几分钟。';
   try {{
     const resp = await fetch('/scrape', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url,type,name,slug}})}});
     const data = await resp.json();
     if (data.ok) {{
-      status.textContent = 'Done! '+data.name+': '+data.pages+' pages, '+Math.round(data.total_chars/1000)+'k chars. Reloading page...';
+      status.textContent = '完成! '+data.name+': '+data.pages+' 页, '+Math.round(data.total_chars/1000)+'k 字。页面即将刷新...';
       setTimeout(() => location.reload(), 2000);
     }} else {{
       status.className = 'status error';
-      status.textContent = 'Error: ' + data.error;
+      status.textContent = '错误: ' + data.error;
     }}
   }} catch(e) {{
     status.className = 'status error';
