@@ -72,6 +72,7 @@ class QuestionRequest(BaseModel):
     question: str
     wiki: str | None = None   # wiki slug, e.g. "isaac"
     top_k: int = 8
+    history: list[dict] = []  # [{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
 
 class RelevantChunk(BaseModel):
     page: str
@@ -442,11 +443,13 @@ async def ask(request: QuestionRequest):
     )
     user_prompt = f"Context:\n\n" + "\n\n".join(context_parts) if context_parts else "Context: (No wiki results found — answer with web search)\n\n" + f"Question: {request.question}\n\nAnswer (must be in the same language as the question):"
 
+    messages = [{"role": "system", "content": sp}] + request.history + [{"role": "user", "content": user_prompt}]
+
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             f"{API_BASE}/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={"model": MODEL, "messages": [{"role": "system", "content": sp}, {"role": "user", "content": user_prompt}], "temperature": 0.3, "max_tokens": 2000, "enable_search": True},
+            json={"model": MODEL, "messages": messages, "temperature": 0.3, "max_tokens": 2000, "enable_search": True},
         )
 
     if resp.status_code != 200:
@@ -551,7 +554,7 @@ body{{font-family:-apple-system,'Segoe UI',sans-serif;background:#1a1a2e;color:#
 </div>
 <script>
 let currentWiki = '{wikis[0]["slug"] if wikis else ""}';
-function switchWiki() {{ currentWiki = document.getElementById('wikiSelect').value; }}
+function switchWiki() {{ currentWiki = document.getElementById('wikiSelect').value; chatHistory = []; document.getElementById('messages').innerHTML = ''; }}
 function toggleScrapeForm() {{
   const f = document.getElementById('scrapeForm');
   f.classList.toggle('show');
@@ -582,20 +585,24 @@ async function scrapeWiki() {{
     status.textContent = 'Network error: ' + e.message;
   }}
 }}
+let chatHistory = [];
 async function ask() {{
   const input = document.getElementById('question');
   const btn = document.getElementById('sendBtn');
   const q = input.value.trim();
   if (!q) return;
-  input.value = ''; btn.disabled = true; btn.innerHTML = 'Sending...<span class="loading"></span>';
+  input.value = ''; btn.disabled = true; btn.innerHTML = 'Sending...<span class=\"loading\"></span>';
   const msgs = document.getElementById('messages');
-  msgs.innerHTML += '<div class="msg user">' + esc(q) + '</div>';
+  msgs.innerHTML += '<div class=\"msg user\">' + esc(q) + '</div>';
   try {{
-    const resp = await fetch('/ask', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{question:q,wiki:currentWiki}})}});
+    const resp = await fetch('/ask', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{question:q,wiki:currentWiki,history:chatHistory}})}});
     const data = await resp.json();
-    let src = data.sources && data.sources.length ? '<div class="src">Sources: '+data.sources.map(s=>s.page).join(', ')+'</div>' : '';
-    msgs.innerHTML += '<div class="msg bot">' + fmt(data.answer) + src + '</div>';
-  }} catch(e) {{ msgs.innerHTML += '<div class="msg bot" style="color:#e94560">Error: '+e.message+'</div>'; }}
+    let src = data.sources && data.sources.length ? '<div class=\"src\">Sources: '+data.sources.map(s=>s.page).join(', ')+'</div>' : '';
+    msgs.innerHTML += '<div class=\"msg bot\">' + fmt(data.answer) + src + '</div>';
+    chatHistory.push({{role:'user',content:q}});
+    chatHistory.push({{role:'assistant',content:data.answer}});
+    if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
+  }} catch(e) {{ msgs.innerHTML += '<div class=\"msg bot\" style=\"color:#e94560\">Error: '+e.message+'</div>'; }}
   btn.disabled = false; btn.innerHTML = 'Send'; msgs.scrollTop = msgs.scrollHeight;
 }}
 function esc(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}
