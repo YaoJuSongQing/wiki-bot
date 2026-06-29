@@ -7,6 +7,15 @@ import re
 import time
 import threading
 from pathlib import Path
+
+# ── Fix Windows SSL cert errors ─────────────────────────────
+try:
+    import certifi
+    import os as _os
+    _os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
+
 import numpy as np
 
 DATA_DIR = Path(__file__).parent / "data"

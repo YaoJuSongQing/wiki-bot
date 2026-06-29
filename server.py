@@ -4,6 +4,13 @@ Auto-discovers wikis from data/*.json, switchable via API and web UI.
 """
 import os
 import sys
+
+# ── Fix Windows SSL cert errors ─────────────────────────────
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
 import re
 from pathlib import Path
 import yaml
