@@ -42,7 +42,7 @@ API_KEY = llm_cfg.get("api_key") or os.environ.get("DEEPSEEK_API_KEY") or os.env
 API_BASE = llm_cfg.get("base_url") or "https://api.deepseek.com/v1"
 MODEL = llm_cfg.get("model") or "deepseek-v4-flash"
 EMBEDDING_MODEL = emb_cfg.get("model", "BAAI/bge-small-zh-v1.5")
-HF_ENDPOINT = emb_cfg.get("hf_endpoint", "")
+HF_ENDPOINT = emb_cfg.get("hf_endpoint", "") or "https://hf-mirror.com"
 HOST = srv_cfg.get("host", "0.0.0.0")
 PORT = int(srv_cfg.get("port", 8080))
 

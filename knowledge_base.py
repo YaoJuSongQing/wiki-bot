@@ -30,8 +30,8 @@ def _get_embedding_model(model_name: str = "BAAI/bge-small-zh-v1.5", hf_endpoint
     global _embedding_model, _embedding_model_name
     if _embedding_model is None or _embedding_model_name != model_name:
         import os
-        if hf_endpoint:
-            os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
+        # Always ensure HF_ENDPOINT is set, fallback to mirror
+        os.environ.setdefault("HF_ENDPOINT", hf_endpoint or "https://hf-mirror.com")
         from sentence_transformers import SentenceTransformer
         _embedding_model = SentenceTransformer(model_name)
         _embedding_model_name = model_name
