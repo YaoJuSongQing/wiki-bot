@@ -33,8 +33,8 @@ if exist "%TEMP%\wikibot_config.yaml" (
 echo [4/4] Updating dependencies...
 if exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
+    python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+    pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ) else (
     echo   No venv found, skipping dependency update
 )

@@ -26,8 +26,8 @@ call venv\Scripts\activate.bat
 
 echo [2/3] Installing dependencies...
 echo   This may take a few minutes...
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
     echo.
     echo [ERROR] Install failed. Check your internet connection.
